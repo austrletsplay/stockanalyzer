@@ -5,6 +5,7 @@ analyzer.py – Datenabruf via yfinance und Berechnung aller Fundamentalkennzahl
 import yfinance as yf
 import pandas as pd
 import math
+import time
 
 
 PERIOD_CONFIG = {
@@ -42,14 +43,27 @@ def fetch_stock_data(ticker_symbol: str) -> dict:
     """
     Ruft alle rohen yfinance-Daten für einen Ticker ab.
     Wirft ValueError bei ungültigem Ticker oder fehlenden Daten.
+    Versucht bei Rate-Limiting bis zu 3 Mal mit Wartezeit.
     """
     ticker_symbol = ticker_symbol.strip().upper()
 
-    try:
-        ticker = yf.Ticker(ticker_symbol)
-        info = ticker.info
-    except Exception as e:
-        raise ValueError(f"Netzwerkfehler beim Abruf von '{ticker_symbol}': {e}")
+    last_error = None
+    for attempt in range(3):
+        try:
+            ticker = yf.Ticker(ticker_symbol)
+            info = ticker.info
+            last_error = None
+            break
+        except Exception as e:
+            last_error = e
+            if "rate" in str(e).lower() or "429" in str(e) or "too many" in str(e).lower():
+                wait = (attempt + 1) * 5
+                time.sleep(wait)
+            else:
+                break
+
+    if last_error:
+        raise ValueError(f"Netzwerkfehler beim Abruf von '{ticker_symbol}': {last_error}")
 
     # Validierung: yfinance gibt bei unbekannten Tickern ein leeres/minimales Dict zurück
     price_keys = ('regularMarketPrice', 'currentPrice', 'previousClose', 'open')

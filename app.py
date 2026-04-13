@@ -7,6 +7,15 @@ import plotly.graph_objects as go
 from datetime import date
 
 from analyzer import fetch_stock_data, calculate_metrics, fetch_price_history, PERIOD_CONFIG
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_fetch(ticker: str):
+    raw = fetch_stock_data(ticker)
+    return calculate_metrics(raw)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_price(ticker: str, label: str):
+    return fetch_price_history(ticker, label)
 from scorer import calculate_score
 from excel_export import generate_excel
 
@@ -357,8 +366,7 @@ def _run_analysis(ticker: str):
 
     with st.spinner(f"Analysiere {ticker} …"):
         try:
-            raw_data = fetch_stock_data(ticker)
-            metrics = calculate_metrics(raw_data)
+            metrics = _cached_fetch(ticker)
         except ValueError as e:
             st.error(f"**Fehler:** {e}")
             return
@@ -457,14 +465,9 @@ def _tab_overview(metrics: dict, scores: dict):
                 st.rerun()
 
     selected_period = st.session_state['price_period']
-    cache_key = f"price_{ticker}_{selected_period}"
 
-    if cache_key not in st.session_state:
-        with st.spinner("Lade Kursdaten…"):
-            df = fetch_price_history(ticker, selected_period)
-        st.session_state[cache_key] = df
-    else:
-        df = st.session_state[cache_key]
+    with st.spinner("Lade Kursdaten…"):
+        df = _cached_price(ticker, selected_period)
 
     if df is not None and not df.empty:
         st.plotly_chart(
