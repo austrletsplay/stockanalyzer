@@ -9,8 +9,6 @@ import time
 import requests
 import feedparser
 from datetime import datetime, timezone, timedelta
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 
 def fetch_news_and_events(company_name: str, ticker: str, calendar: dict) -> dict:
@@ -29,7 +27,11 @@ def fetch_news_and_events(company_name: str, ticker: str, calendar: dict) -> dic
 
     news_items = []
     try:
-        feed = feedparser.parse(rss_url)
+        # feedparser sendet keinen User-Agent → Google blockiert es
+        # Zuerst mit requests laden, dann mit feedparser parsen
+        import io
+        rss_response = requests.get(rss_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+        feed = feedparser.parse(io.BytesIO(rss_response.content))
         for entry in feed.entries[:15]:
             # Datum parsen
             pub_dt = None
@@ -143,7 +145,9 @@ def fetch_news_and_events(company_name: str, ticker: str, calendar: dict) -> dic
     try:
         event_query = f"{company_name} {ticker} 2025 2026".replace(" ", "+")
         event_url = f"https://news.google.com/rss/search?q={event_query}&hl=en&gl=US&ceid=US:en"
-        event_feed = feedparser.parse(event_url)
+        import io as _io
+        event_rss = requests.get(event_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+        event_feed = feedparser.parse(_io.BytesIO(event_rss.content))
         seen_titles = set()
         for entry in event_feed.entries[:20]:
             title_lower = getattr(entry, 'title', '').lower()
@@ -169,22 +173,6 @@ def fetch_news_and_events(company_name: str, ticker: str, calendar: dict) -> dic
 
     return {'news': news_items, 'events': events[:8]}
 
-
-def _make_session() -> requests.Session:
-    """Erstellt eine Session mit Browser-Headers um Rate-Limiting zu umgehen."""
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
-    })
-    retry = Retry(total=3, backoff_factor=2, status_forcelist=[429, 500, 502, 503])
-    session.mount("https://", HTTPAdapter(max_retries=retry))
-    return session
 
 
 PERIOD_CONFIG = {
@@ -236,7 +224,7 @@ def fetch_stock_data(ticker_symbol: str) -> dict:
         except Exception as e:
             last_error = e
             if "rate" in str(e).lower() or "429" in str(e) or "too many" in str(e).lower():
-                wait = (attempt + 1) * 8
+                wait = (attempt + 1) * 15  # 15s, 30s, 45s
                 time.sleep(wait)
             else:
                 break
@@ -254,9 +242,13 @@ def fetch_stock_data(ticker_symbol: str) -> dict:
         )
 
     # Finanzdaten einzeln abrufen – ETFs/Indizes haben keine Jahresabschlüsse
+    # Kleine Pausen zwischen Requests um Yahoo Finance Rate-Limiting zu vermeiden
     financials = _safe_fetch(ticker, 'financials')
+    time.sleep(0.5)
     balance_sheet = _safe_fetch(ticker, 'balance_sheet')
+    time.sleep(0.5)
     cashflow = _safe_fetch(ticker, 'cashflow')
+    time.sleep(0.5)
 
     if financials is None and info.get('totalRevenue') is None:
         raise ValueError(
