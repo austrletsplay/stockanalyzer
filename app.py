@@ -905,89 +905,52 @@ def _tab_report(metrics: dict, scores: dict):
 
 def _render_news_and_events(metrics: dict):
     """Zeigt anstehende Events (Earnings, Dividenden) und aktuelle Nachrichten."""
-    from datetime import datetime
-
-    calendar = metrics.get('calendar', {})
-    news = metrics.get('news', [])
+    events = metrics.get('events', [])
+    news   = metrics.get('news', [])
 
     # ── Anstehende Events ──
-    events_found = False
-    if calendar:
-        # Earnings Date
-        earnings = calendar.get('Earnings Date') or calendar.get('earningsDate')
-        if earnings:
-            events_found = True
-            if isinstance(earnings, list):
-                earnings = earnings[0]
-            try:
-                ed = pd.to_datetime(earnings)
-                days = (ed - pd.Timestamp.now()).days
-                if days >= 0:
-                    st.info(f"📅 **Nächste Quartalszahlen:** {ed.strftime('%d. %B %Y')} (in {days} Tagen)")
-                else:
-                    st.info(f"📅 **Letzte Quartalszahlen:** {ed.strftime('%d. %B %Y')}")
-            except Exception:
-                st.info(f"📅 **Earnings Date:** {earnings}")
-
-        # Dividende
-        div_date = calendar.get('Dividend Date') or calendar.get('dividendDate')
-        div_val  = calendar.get('Dividend Amount') or calendar.get('dividendRate') or \
-                   metrics['company'].get('currency', '')
-        if div_date:
-            events_found = True
-            try:
-                dd = pd.to_datetime(div_date)
-                st.info(f"💰 **Nächste Dividende:** {dd.strftime('%d. %B %Y')}"
-                        + (f" · {div_val}" if div_val else ""))
-            except Exception:
-                pass
-
-        # Ex-Dividenden-Datum
-        ex_div = calendar.get('Ex-Dividend Date') or calendar.get('exDividendDate')
-        if ex_div:
-            try:
-                xd = pd.to_datetime(ex_div)
-                st.info(f"✂️ **Ex-Dividenden-Datum:** {xd.strftime('%d. %B %Y')}")
-            except Exception:
-                pass
-
-    if not events_found:
+    if events:
+        for ev in events:
+            ev_type = ev.get('type', '')
+            ev_date = ev.get('date', '')
+            ev_note = ev.get('note', '')
+            ev_link = ev.get('link', '')
+            date_str = f" · {ev_date}" if ev_date else ""
+            note_str = f" — {ev_note}" if ev_note else ""
+            line = f"{ev_type}{date_str}{note_str}"
+            if ev_link:
+                st.info(f"{line} · [Mehr]({ev_link})")
+            else:
+                st.info(line)
+    else:
         st.caption("Keine anstehenden Events verfügbar.")
 
     # ── Aktuelle Nachrichten (Google News) ──
     if news:
-        st.markdown("**Aktuelle Meldungen & Events:**")
-        shown = 0
-        for item in news[:10]:
-            title     = item.get('title') or item.get('Title', '')
-            source    = item.get('source') or item.get('publisher') or ''
-            link      = item.get('link') or item.get('Link', '')
-            pub_raw   = item.get('published') or item.get('providerPublishTime', '')
+        st.markdown("**Aktuelle Meldungen (letzte 7 Tage):**")
+        for item in news:
+            title   = item.get('title', '')
+            summary = item.get('summary', '')
+            link    = item.get('link', '')
+            source  = item.get('source', '')
+            date    = item.get('date', '')
 
             if not title:
                 continue
 
-            # Datum parsen — Google News gibt RFC-2822 Format, Yahoo gibt Unix-Timestamp
-            dt = ''
-            try:
-                if isinstance(pub_raw, (int, float)) and pub_raw > 0:
-                    dt = datetime.fromtimestamp(int(pub_raw)).strftime('%d.%m.%Y')
-                elif isinstance(pub_raw, str) and pub_raw:
-                    dt = pd.to_datetime(pub_raw, utc=True).strftime('%d.%m.%Y')
-            except Exception:
-                pass
-
-            src_info  = f" · *{source}*" if source else ""
-            date_info = f" · {dt}" if dt else ""
+            meta = []
+            if source:
+                meta.append(f"*{source}*")
+            if date:
+                meta.append(date)
+            meta_str = " · ".join(meta)
 
             if link:
-                st.markdown(f"- [{title}]({link}){src_info}{date_info}")
+                st.markdown(f"**[{title}]({link})**" + (f"  \n{meta_str}" if meta_str else ""))
             else:
-                st.markdown(f"- **{title}**{src_info}{date_info}")
-            shown += 1
-
-        if shown == 0:
-            st.caption("Keine aktuellen Nachrichten verfügbar.")
+                st.markdown(f"**{title}**" + (f"  \n{meta_str}" if meta_str else ""))
+            if summary:
+                st.caption(summary)
     else:
         st.caption("Keine Nachrichten verfügbar.")
 

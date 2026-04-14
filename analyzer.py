@@ -7,44 +7,167 @@ import pandas as pd
 import math
 import time
 import requests
-import xml.etree.ElementTree as ET
+import feedparser
+from datetime import datetime, timezone, timedelta
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
-def fetch_google_news(company_name: str, ticker: str, max_results: int = 10) -> list[dict]:
+def fetch_news_and_events(company_name: str, ticker: str, calendar: dict) -> dict:
     """
-    Sucht aktuelle Nachrichten via Google News RSS.
-    Gibt Liste von {title, link, published, source} zurück.
-    Keine API-Keys nötig — kostenlos und umfassend.
+    Holt Nachrichten der letzten 7 Tage + wichtige Events der nächsten 6 Monate.
+    Nutzt Google News RSS via feedparser — kein API-Key nötig.
+    Gibt {'news': [...], 'events': [...]} zurück.
     """
-    query = f"{company_name} {ticker} stock".replace(" ", "+")
-    url = f"https://news.google.com/rss/search?q={query}&hl=de&gl=DE&ceid=DE:de"
+    now = datetime.now(timezone.utc)
+    week_ago = now - timedelta(days=7)
+    six_months = now + timedelta(days=180)
+
+    # ── Nachrichten (letzte 7 Tage) ──────────────────────────────────────────
+    query = f"{company_name} {ticker}".replace(" ", "+")
+    rss_url = f"https://news.google.com/rss/search?q={query}&hl=en&gl=US&ceid=US:en"
+
+    news_items = []
     try:
-        resp = requests.get(url, timeout=8, headers={
-            "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1)"
-        })
-        if resp.status_code != 200:
-            return []
-        root = ET.fromstring(resp.content)
-        items = root.findall(".//item")
-        results = []
-        for item in items[:max_results]:
-            title = (item.findtext("title") or "").strip()
-            link  = item.findtext("link") or ""
-            pub   = item.findtext("pubDate") or ""
-            src_el = item.find("source")
-            source = src_el.text if src_el is not None else ""
+        feed = feedparser.parse(rss_url)
+        for entry in feed.entries[:15]:
+            # Datum parsen
+            pub_dt = None
+            if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                pub_dt = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+            elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
+                pub_dt = datetime(*entry.updated_parsed[:6], tzinfo=timezone.utc)
+
+            # Nur letzte 7 Tage
+            if pub_dt and pub_dt < week_ago:
+                continue
+
+            title   = getattr(entry, 'title', '').strip()
+            link    = getattr(entry, 'link', '')
+            source  = getattr(entry, 'source', {})
+            src_name = source.get('title', '') if isinstance(source, dict) else ''
+            summary = getattr(entry, 'summary', '') or ''
+            # Kurze Zusammenfassung: erste 120 Zeichen des summary, HTML entfernen
+            import re
+            clean = re.sub(r'<[^>]+>', '', summary).strip()
+            short_summary = clean[:150] + '…' if len(clean) > 150 else clean
+
+            pub_str = pub_dt.strftime('%d.%m.%Y') if pub_dt else ''
+
             if title:
-                results.append({
-                    "title": title,
-                    "link": link,
-                    "published": pub,
-                    "source": source,
+                news_items.append({
+                    'title':   title,
+                    'summary': short_summary,
+                    'link':    link,
+                    'source':  src_name,
+                    'date':    pub_str,
                 })
-        return results
+        # Max 8 Artikel
+        news_items = news_items[:8]
     except Exception:
-        return []
+        pass
+
+    # ── Events (nächste 6 Monate) ────────────────────────────────────────────
+    events = []
+
+    # 1. Earnings aus yfinance Calendar
+    for key in ('Earnings Date', 'earningsDate', 'Earnings Dates'):
+        val = calendar.get(key)
+        if val:
+            dates = val if isinstance(val, list) else [val]
+            for d in dates:
+                try:
+                    dt = pd.to_datetime(d)
+                    if pd.Timestamp.now() <= dt <= pd.Timestamp.now() + pd.Timedelta(days=180):
+                        days = (dt - pd.Timestamp.now()).days
+                        events.append({
+                            'type':  '📅 Quartalszahlen',
+                            'date':  dt.strftime('%d. %B %Y'),
+                            'days':  days,
+                            'note':  f'In {days} Tagen — Umsatz & Gewinn werden veröffentlicht',
+                        })
+                except Exception:
+                    pass
+            break
+
+    # 2. Dividende
+    for key in ('Dividend Date', 'dividendDate'):
+        val = calendar.get(key)
+        if val:
+            try:
+                dt = pd.to_datetime(val)
+                if pd.Timestamp.now() <= dt <= pd.Timestamp.now() + pd.Timedelta(days=180):
+                    days = (dt - pd.Timestamp.now()).days
+                    amount = calendar.get('Dividend Amount') or calendar.get('dividendRate', '')
+                    events.append({
+                        'type': '💰 Dividendenzahlung',
+                        'date': dt.strftime('%d. %B %Y'),
+                        'days': days,
+                        'note': f'In {days} Tagen' + (f' · {amount}' if amount else ''),
+                    })
+            except Exception:
+                pass
+            break
+
+    # 3. Ex-Dividenden-Datum
+    for key in ('Ex-Dividend Date', 'exDividendDate'):
+        val = calendar.get(key)
+        if val:
+            try:
+                dt = pd.to_datetime(val)
+                if pd.Timestamp.now() <= dt <= pd.Timestamp.now() + pd.Timedelta(days=180):
+                    days = (dt - pd.Timestamp.now()).days
+                    events.append({
+                        'type': '✂️ Ex-Dividenden-Datum',
+                        'date': dt.strftime('%d. %B %Y'),
+                        'days': days,
+                        'note': f'In {days} Tagen — Aktie muss vor diesem Datum gehalten werden',
+                    })
+            except Exception:
+                pass
+            break
+
+    # 4. Zukunfts-Events aus News erkennen (Produktlaunches, Konferenzen etc.)
+    event_keywords = [
+        ('launch', '🚀 Produktlaunch'),
+        ('release', '🎮 Release'),
+        ('conference', '🎤 Konferenz'),
+        ('investor day', '📊 Investor Day'),
+        ('annual meeting', '🏛️ Hauptversammlung'),
+        ('fda', '🏥 FDA-Entscheidung'),
+        ('acquisition', '🤝 Übernahme'),
+        ('merger', '🤝 Fusion'),
+        ('partnership', '🤝 Partnerschaft'),
+        ('earnings', '📅 Earnings'),
+    ]
+    try:
+        event_query = f"{company_name} {ticker} 2025 2026".replace(" ", "+")
+        event_url = f"https://news.google.com/rss/search?q={event_query}&hl=en&gl=US&ceid=US:en"
+        event_feed = feedparser.parse(event_url)
+        seen_titles = set()
+        for entry in event_feed.entries[:20]:
+            title_lower = getattr(entry, 'title', '').lower()
+            for keyword, label in event_keywords:
+                if keyword in title_lower:
+                    title = getattr(entry, 'title', '').strip()
+                    link  = getattr(entry, 'link', '')
+                    if title and title not in seen_titles:
+                        seen_titles.add(title)
+                        events.append({
+                            'type': label,
+                            'date': '',
+                            'days': 999,
+                            'note': title,
+                            'link': link,
+                        })
+                    break
+    except Exception:
+        pass
+
+    # Events nach Datum sortieren
+    events.sort(key=lambda x: x.get('days', 999))
+
+    return {'news': news_items, 'events': events[:8]}
 
 
 def _make_session() -> requests.Session:
@@ -143,13 +266,8 @@ def fetch_stock_data(ticker_symbol: str) -> dict:
             "Bitte nur Aktien eingeben (keine ETFs, Indizes oder Rohstoffe)."
         )
 
-    # News & Kalender (kein Fehler wenn nicht verfügbar)
-    yahoo_news = []
+    # Kalender (kein Fehler wenn nicht verfügbar)
     calendar = {}
-    try:
-        yahoo_news = ticker.news or []
-    except Exception:
-        pass
     try:
         cal = ticker.calendar
         if isinstance(cal, dict):
@@ -159,12 +277,9 @@ def fetch_stock_data(ticker_symbol: str) -> dict:
     except Exception:
         pass
 
-    # Google News — umfassender als Yahoo (findet auch Produkt-Events wie GTA 6)
+    # News & Events via Google News RSS + yfinance Calendar
     company_name = info.get('longName') or info.get('shortName') or ticker_symbol
-    google_news = fetch_google_news(company_name, ticker_symbol, max_results=10)
-
-    # Google News bevorzugen, Yahoo als Fallback
-    news = google_news if google_news else yahoo_news
+    news_and_events = fetch_news_and_events(company_name, ticker_symbol, calendar)
 
     return {
         'ticker_symbol': ticker_symbol,
@@ -172,7 +287,8 @@ def fetch_stock_data(ticker_symbol: str) -> dict:
         'financials': financials,
         'balance_sheet': balance_sheet,
         'cashflow': cashflow,
-        'news': news,
+        'news': news_and_events.get('news', []),
+        'events': news_and_events.get('events', []),
         'calendar': calendar,
     }
 
@@ -218,6 +334,7 @@ def calculate_metrics(raw_data: dict) -> dict:
         'balance_sheet': balance_sheet,
         'historical_table': historical_table,
         'news': raw_data.get('news', []),
+        'events': raw_data.get('events', []),
         'calendar': raw_data.get('calendar', {}),
     }
 
