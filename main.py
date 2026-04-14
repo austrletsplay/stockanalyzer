@@ -14,10 +14,24 @@ Was ist JSON?
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from datetime import datetime, timedelta
 
 from analyzer import fetch_stock_data, calculate_metrics, fetch_price_history, PERIOD_CONFIG
 from scorer import calculate_score
 from excel_export import generate_excel
+
+# ── Einfacher In-Memory Cache (1 Stunde TTL) ──────────────────────────────────
+_cache: dict = {}
+CACHE_TTL = timedelta(hours=1)
+
+def _cache_get(key: str):
+    entry = _cache.get(key)
+    if entry and datetime.now() - entry['time'] < CACHE_TTL:
+        return entry['data']
+    return None
+
+def _cache_set(key: str, data):
+    _cache[key] = {'data': data, 'time': datetime.now()}
 
 # ── App erstellen ──────────────────────────────────────────────────────────────
 # FastAPI() erstellt die Web-API. Der title und description erscheinen in der
@@ -56,18 +70,20 @@ def analyze(ticker: str):
     Beispiel-Aufruf: GET /api/analyze/AAPL
     """
     try:
-        # Daten von Yahoo Finance holen (dein bestehender Code)
+        ticker = ticker.upper()
+        cache_key = f"analyze_{ticker}"
+
+        # Cache prüfen
+        cached = _cache_get(cache_key)
+        if cached:
+            return cached
+
+        # Daten von Yahoo Finance holen
         raw = fetch_stock_data(ticker)
-
-        # Kennzahlen berechnen (dein bestehender Code)
         metrics = calculate_metrics(raw)
-
-        # Score berechnen (dein bestehender Code)
         score = calculate_score(metrics)
 
-        # Alles zusammenpacken und zurückgeben
-        # Das Frontend empfängt dieses Dictionary als JSON
-        return {
+        result = {
             "company":          metrics["company"],
             "score":            score,
             "growth":           metrics["growth"],
@@ -78,6 +94,9 @@ def analyze(ticker: str):
             "news":             metrics["news"],
             "events":           metrics["events"],
         }
+
+        _cache_set(cache_key, result)
+        return result
 
     except ValueError as e:
         # ValueError = ungültiger Ticker oder keine Daten verfügbar
@@ -108,7 +127,14 @@ def price(ticker: str, period: str = "1M"):
             detail=f"Ungültiger Zeitraum '{period}'. Gültig: {list(PERIOD_CONFIG.keys())}"
         )
 
-    df = fetch_price_history(ticker.upper(), period)
+    ticker = ticker.upper()
+    cache_key = f"price_{ticker}_{period}"
+
+    cached = _cache_get(cache_key)
+    if cached:
+        return cached
+
+    df = fetch_price_history(ticker, period)
 
     if df is None or df.empty:
         raise HTTPException(
@@ -129,11 +155,13 @@ def price(ticker: str, period: str = "1M"):
             "volume": int(row["Volume"]),
         })
 
-    return {
-        "ticker": ticker.upper(),
+    result = {
+        "ticker": ticker,
         "period": period,
         "data":   records,
     }
+    _cache_set(cache_key, result)
+    return result
 
 
 # ── Endpunkt 3: Excel Export ──────────────────────────────────────────────────
