@@ -85,12 +85,30 @@ def fetch_stock_data(ticker_symbol: str) -> dict:
             "Bitte nur Aktien eingeben (keine ETFs, Indizes oder Rohstoffe)."
         )
 
+    # News & Kalender (kein Fehler wenn nicht verfügbar)
+    news = []
+    calendar = {}
+    try:
+        news = ticker.news or []
+    except Exception:
+        pass
+    try:
+        cal = ticker.calendar
+        if isinstance(cal, dict):
+            calendar = cal
+        elif hasattr(cal, 'to_dict'):
+            calendar = cal.to_dict()
+    except Exception:
+        pass
+
     return {
         'ticker_symbol': ticker_symbol,
         'info': info,
         'financials': financials,
         'balance_sheet': balance_sheet,
         'cashflow': cashflow,
+        'news': news,
+        'calendar': calendar,
     }
 
 
@@ -125,18 +143,90 @@ def calculate_metrics(raw_data: dict) -> dict:
         if pe and eps_cagr and eps_cagr > 0:
             valuation['peg'] = round(pe / (eps_cagr * 100), 2)
 
+    historical_table = _build_historical_table(fin, bs, cf, info)
+
     return {
         'company': company,
         'valuation': valuation,
         'growth': growth,
         'profitability': profitability,
         'balance_sheet': balance_sheet,
+        'historical_table': historical_table,
+        'news': raw_data.get('news', []),
+        'calendar': raw_data.get('calendar', {}),
     }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Interne Berechnungsfunktionen
 # ──────────────────────────────────────────────────────────────────────────────
+
+def _build_historical_table(fin, bs, cf, info) -> dict:
+    """
+    Erstellt eine Jahrestabelle mit allen wichtigen Kennzahlen (bis 5 Jahre).
+    Gibt dict zurück: { 'years': [...], 'rows': [{'label': ..., 'values': [...], 'format': ...}] }
+    """
+    if fin is None or fin.empty:
+        return {'years': [], 'rows': []}
+
+    # Jahresspalten: ältestes zuerst, max. 5 Jahre
+    cols = sorted(fin.columns)[-5:]
+    years = [str(c.year) for c in cols]
+    shares = info.get('sharesOutstanding') or info.get('impliedSharesOutstanding') or 1
+
+    def row_vals(df, keys):
+        """Holt Zeilenwerte aus DataFrame, gibt Liste mit None für fehlende Jahre."""
+        series = None
+        if df is not None and not df.empty:
+            for k in keys:
+                if k in df.index:
+                    series = df.loc[k]
+                    break
+        if series is None:
+            return [None] * len(cols)
+        return [series.get(c) if _is_valid(series.get(c, None)) else None for c in cols]
+
+    def margin_vals(numerator_vals, revenue_vals):
+        result = []
+        for n, r in zip(numerator_vals, revenue_vals):
+            if n is not None and r and r != 0:
+                result.append(n / r)
+            else:
+                result.append(None)
+        return result
+
+    revenue   = row_vals(fin, ['Total Revenue', 'TotalRevenue'])
+    gross     = row_vals(fin, ['Gross Profit', 'GrossProfit'])
+    ebit      = row_vals(fin, ['Operating Income', 'Ebit', 'EBIT'])
+    net_inc   = row_vals(fin, ['Net Income', 'NetIncome'])
+    ocf       = row_vals(cf,  ['Operating Cash Flow', 'Total Cash From Operating Activities']) if cf is not None else [None]*len(cols)
+    capex_raw = row_vals(cf,  ['Capital Expenditures', 'Purchase Of Property Plant And Equipment']) if cf is not None else [None]*len(cols)
+    fcf       = [
+        (o + c) if o is not None and c is not None else (o if o is not None else None)
+        for o, c in zip(ocf, capex_raw)
+    ]
+    total_debt = row_vals(bs, ['Total Debt', 'Long Term Debt']) if bs is not None else [None]*len(cols)
+    cash       = row_vals(bs, ['Cash And Cash Equivalents', 'Cash Cash Equivalents And Short Term Investments']) if bs is not None else [None]*len(cols)
+    equity     = row_vals(bs, ['Total Stockholder Equity', 'Stockholders Equity']) if bs is not None else [None]*len(cols)
+
+    eps = [ni / shares if ni is not None else None for ni in net_inc]
+
+    rows = [
+        {'label': 'Umsatz',           'values': revenue,                          'format': 'big'},
+        {'label': 'Bruttogewinn',      'values': gross,                            'format': 'big'},
+        {'label': 'EBIT',              'values': ebit,                             'format': 'big'},
+        {'label': 'Nettogewinn',       'values': net_inc,                          'format': 'big'},
+        {'label': 'EPS (Gew. je Akt.)','values': eps,                             'format': 'eps'},
+        {'label': 'Free Cash Flow',    'values': fcf,                              'format': 'big'},
+        {'label': 'Bruttomarge',       'values': margin_vals(gross, revenue),      'format': 'pct'},
+        {'label': 'EBIT-Marge',        'values': margin_vals(ebit, revenue),       'format': 'pct'},
+        {'label': 'Nettomarge',        'values': margin_vals(net_inc, revenue),    'format': 'pct'},
+        {'label': 'Gesamtschulden',    'values': total_debt,                       'format': 'big'},
+        {'label': 'Kassenbestand',     'values': cash,                             'format': 'big'},
+        {'label': 'Eigenkapital',      'values': equity,                           'format': 'big'},
+    ]
+
+    return {'years': years, 'rows': rows}
 
 def _calc_company(info: dict, ticker: str) -> dict:
     market_cap = _safe_get(info, 'marketCap')

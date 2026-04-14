@@ -4,6 +4,7 @@ app.py – Streamlit Web-App für Quality-Growth Fundamentalanalyse.
 
 import streamlit as st
 import plotly.graph_objects as go
+import pandas as pd
 from datetime import date
 
 from analyzer import fetch_stock_data, calculate_metrics, fetch_price_history, PERIOD_CONFIG
@@ -606,6 +607,44 @@ def _tab_details(metrics: dict, scores: dict):
             ("EV/EBITDA", x(v.get('ev_ebitda')), "<15x", {}),
         ])
 
+    # ── 5-Jahres-Vergleichstabelle ──
+    ht = metrics.get('historical_table', {})
+    if ht.get('years') and ht.get('rows'):
+        with st.expander("📊  5-Jahres-Vergleich", expanded=True):
+            _render_historical_table(ht, metrics['company'].get('currency', 'USD'))
+
+
+def _render_historical_table(ht: dict, currency: str):
+    """Zeigt die 5-Jahres-Vergleichstabelle als formatiertes DataFrame."""
+    years = ht['years']
+    rows  = ht['rows']
+
+    def fmt(val, fmt_type):
+        if val is None:
+            return "—"
+        try:
+            v = float(val)
+            if fmt_type == 'pct':
+                return f"{v*100:.1f}%"
+            elif fmt_type == 'eps':
+                return f"{v:.2f}"
+            else:  # 'big'
+                if abs(v) >= 1e12: return f"{v/1e12:.2f}T"
+                if abs(v) >= 1e9:  return f"{v/1e9:.2f}B"
+                if abs(v) >= 1e6:  return f"{v/1e6:.2f}M"
+                return f"{v:,.0f}"
+        except Exception:
+            return "—"
+
+    data = {"Kennzahl": [r['label'] for r in rows]}
+    for i, year in enumerate(years):
+        data[year] = [fmt(r['values'][i] if i < len(r['values']) else None, r['format']) for r in rows]
+
+    df = pd.DataFrame(data)
+    st.dataframe(df, use_container_width=True, hide_index=True,
+                 column_config={"Kennzahl": st.column_config.TextColumn(width="medium")})
+    st.caption(f"Alle Geldbeträge in {currency}. Quellen: Yahoo Finance / Unternehmensberichte.")
+
 
 def _render_breakdown_table(rows: list):
     """
@@ -847,7 +886,12 @@ def _tab_report(metrics: dict, scores: dict):
                "teuer auf FCF-Basis.")
         )
 
-    # 7. Fazit
+    # 7. Nachrichten & zukünftige Events
+    st.markdown("---")
+    st.markdown("### Aktuelle Nachrichten & Events")
+    _render_news_and_events(metrics)
+
+    # 8. Fazit
     st.markdown("---")
     st.markdown("### Fazit & Investment-These")
     _write_conclusion(company, scores, g, p, b, v)
@@ -857,6 +901,90 @@ def _tab_report(metrics: dict, scores: dict):
         "⚠ **Hinweis:** Diese Analyse dient nur zu Informationszwecken und stellt keine "
         "Anlageberatung dar. Investitionsentscheidungen sollten auf eigener Recherche basieren."
     )
+
+
+def _render_news_and_events(metrics: dict):
+    """Zeigt anstehende Events (Earnings, Dividenden) und aktuelle Nachrichten."""
+    from datetime import datetime
+
+    calendar = metrics.get('calendar', {})
+    news = metrics.get('news', [])
+
+    # ── Anstehende Events ──
+    events_found = False
+    if calendar:
+        # Earnings Date
+        earnings = calendar.get('Earnings Date') or calendar.get('earningsDate')
+        if earnings:
+            events_found = True
+            if isinstance(earnings, list):
+                earnings = earnings[0]
+            try:
+                ed = pd.to_datetime(earnings)
+                days = (ed - pd.Timestamp.now()).days
+                if days >= 0:
+                    st.info(f"📅 **Nächste Quartalszahlen:** {ed.strftime('%d. %B %Y')} (in {days} Tagen)")
+                else:
+                    st.info(f"📅 **Letzte Quartalszahlen:** {ed.strftime('%d. %B %Y')}")
+            except Exception:
+                st.info(f"📅 **Earnings Date:** {earnings}")
+
+        # Dividende
+        div_date = calendar.get('Dividend Date') or calendar.get('dividendDate')
+        div_val  = calendar.get('Dividend Amount') or calendar.get('dividendRate') or \
+                   metrics['company'].get('currency', '')
+        if div_date:
+            events_found = True
+            try:
+                dd = pd.to_datetime(div_date)
+                st.info(f"💰 **Nächste Dividende:** {dd.strftime('%d. %B %Y')}"
+                        + (f" · {div_val}" if div_val else ""))
+            except Exception:
+                pass
+
+        # Ex-Dividenden-Datum
+        ex_div = calendar.get('Ex-Dividend Date') or calendar.get('exDividendDate')
+        if ex_div:
+            try:
+                xd = pd.to_datetime(ex_div)
+                st.info(f"✂️ **Ex-Dividenden-Datum:** {xd.strftime('%d. %B %Y')}")
+            except Exception:
+                pass
+
+    if not events_found:
+        st.caption("Keine anstehenden Events verfügbar.")
+
+    # ── Aktuelle Nachrichten ──
+    if news:
+        st.markdown("**Aktuelle Meldungen:**")
+        shown = 0
+        for item in news[:8]:
+            title = item.get('title') or item.get('Title', '')
+            publisher = item.get('publisher') or item.get('Publisher', '')
+            link = item.get('link') or item.get('Link', '')
+            ts = item.get('providerPublishTime') or item.get('published', 0)
+
+            if not title:
+                continue
+
+            try:
+                dt = datetime.fromtimestamp(int(ts)).strftime('%d.%m.%Y') if ts else ''
+            except Exception:
+                dt = ''
+
+            pub_info = f" · *{publisher}*" if publisher else ""
+            date_info = f" · {dt}" if dt else ""
+
+            if link:
+                st.markdown(f"- [{title}]({link}){pub_info}{date_info}")
+            else:
+                st.markdown(f"- **{title}**{pub_info}{date_info}")
+            shown += 1
+
+        if shown == 0:
+            st.caption("Keine aktuellen Nachrichten verfügbar.")
+    else:
+        st.caption("Keine Nachrichten verfügbar.")
 
 
 def _write_conclusion(company, scores, g, p, b, v):
