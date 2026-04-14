@@ -204,8 +204,7 @@ def fetch_price_history(ticker_symbol: str, label: str = "1M") -> pd.DataFrame |
     """
     cfg = PERIOD_CONFIG.get(label, PERIOD_CONFIG["1M"])
     try:
-        session = _make_session()
-        ticker = yf.Ticker(ticker_symbol.upper(), session=session)
+        ticker = yf.Ticker(ticker_symbol.upper())
         df = ticker.history(period=cfg["period"], interval=cfg["interval"])
         if df.empty:
             return None
@@ -230,8 +229,7 @@ def fetch_stock_data(ticker_symbol: str) -> dict:
     last_error = None
     for attempt in range(3):
         try:
-            session = _make_session()
-            ticker = yf.Ticker(ticker_symbol, session=session)
+            ticker = yf.Ticker(ticker_symbol)
             info = ticker.info
             last_error = None
             break
