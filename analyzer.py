@@ -6,6 +6,26 @@ import yfinance as yf
 import pandas as pd
 import math
 import time
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+
+def _make_session() -> requests.Session:
+    """Erstellt eine Session mit Browser-Headers um Rate-Limiting zu umgehen."""
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
+    })
+    retry = Retry(total=3, backoff_factor=2, status_forcelist=[429, 500, 502, 503])
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    return session
 
 
 PERIOD_CONFIG = {
@@ -25,7 +45,8 @@ def fetch_price_history(ticker_symbol: str, label: str = "1M") -> pd.DataFrame |
     """
     cfg = PERIOD_CONFIG.get(label, PERIOD_CONFIG["1M"])
     try:
-        ticker = yf.Ticker(ticker_symbol.upper())
+        session = _make_session()
+        ticker = yf.Ticker(ticker_symbol.upper(), session=session)
         df = ticker.history(period=cfg["period"], interval=cfg["interval"])
         if df.empty:
             return None
@@ -50,14 +71,15 @@ def fetch_stock_data(ticker_symbol: str) -> dict:
     last_error = None
     for attempt in range(3):
         try:
-            ticker = yf.Ticker(ticker_symbol)
+            session = _make_session()
+            ticker = yf.Ticker(ticker_symbol, session=session)
             info = ticker.info
             last_error = None
             break
         except Exception as e:
             last_error = e
             if "rate" in str(e).lower() or "429" in str(e) or "too many" in str(e).lower():
-                wait = (attempt + 1) * 5
+                wait = (attempt + 1) * 8
                 time.sleep(wait)
             else:
                 break
