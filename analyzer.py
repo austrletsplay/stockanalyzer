@@ -7,8 +7,44 @@ import pandas as pd
 import math
 import time
 import requests
+import xml.etree.ElementTree as ET
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+
+def fetch_google_news(company_name: str, ticker: str, max_results: int = 10) -> list[dict]:
+    """
+    Sucht aktuelle Nachrichten via Google News RSS.
+    Gibt Liste von {title, link, published, source} zurück.
+    Keine API-Keys nötig — kostenlos und umfassend.
+    """
+    query = f"{company_name} {ticker} stock".replace(" ", "+")
+    url = f"https://news.google.com/rss/search?q={query}&hl=de&gl=DE&ceid=DE:de"
+    try:
+        resp = requests.get(url, timeout=8, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1)"
+        })
+        if resp.status_code != 200:
+            return []
+        root = ET.fromstring(resp.content)
+        items = root.findall(".//item")
+        results = []
+        for item in items[:max_results]:
+            title = (item.findtext("title") or "").strip()
+            link  = item.findtext("link") or ""
+            pub   = item.findtext("pubDate") or ""
+            src_el = item.find("source")
+            source = src_el.text if src_el is not None else ""
+            if title:
+                results.append({
+                    "title": title,
+                    "link": link,
+                    "published": pub,
+                    "source": source,
+                })
+        return results
+    except Exception:
+        return []
 
 
 def _make_session() -> requests.Session:
@@ -108,10 +144,10 @@ def fetch_stock_data(ticker_symbol: str) -> dict:
         )
 
     # News & Kalender (kein Fehler wenn nicht verfügbar)
-    news = []
+    yahoo_news = []
     calendar = {}
     try:
-        news = ticker.news or []
+        yahoo_news = ticker.news or []
     except Exception:
         pass
     try:
@@ -122,6 +158,13 @@ def fetch_stock_data(ticker_symbol: str) -> dict:
             calendar = cal.to_dict()
     except Exception:
         pass
+
+    # Google News — umfassender als Yahoo (findet auch Produkt-Events wie GTA 6)
+    company_name = info.get('longName') or info.get('shortName') or ticker_symbol
+    google_news = fetch_google_news(company_name, ticker_symbol, max_results=10)
+
+    # Google News bevorzugen, Yahoo als Fallback
+    news = google_news if google_news else yahoo_news
 
     return {
         'ticker_symbol': ticker_symbol,

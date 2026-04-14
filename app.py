@@ -954,31 +954,36 @@ def _render_news_and_events(metrics: dict):
     if not events_found:
         st.caption("Keine anstehenden Events verfügbar.")
 
-    # ── Aktuelle Nachrichten ──
+    # ── Aktuelle Nachrichten (Google News) ──
     if news:
-        st.markdown("**Aktuelle Meldungen:**")
+        st.markdown("**Aktuelle Meldungen & Events:**")
         shown = 0
-        for item in news[:8]:
-            title = item.get('title') or item.get('Title', '')
-            publisher = item.get('publisher') or item.get('Publisher', '')
-            link = item.get('link') or item.get('Link', '')
-            ts = item.get('providerPublishTime') or item.get('published', 0)
+        for item in news[:10]:
+            title     = item.get('title') or item.get('Title', '')
+            source    = item.get('source') or item.get('publisher') or ''
+            link      = item.get('link') or item.get('Link', '')
+            pub_raw   = item.get('published') or item.get('providerPublishTime', '')
 
             if not title:
                 continue
 
+            # Datum parsen — Google News gibt RFC-2822 Format, Yahoo gibt Unix-Timestamp
+            dt = ''
             try:
-                dt = datetime.fromtimestamp(int(ts)).strftime('%d.%m.%Y') if ts else ''
+                if isinstance(pub_raw, (int, float)) and pub_raw > 0:
+                    dt = datetime.fromtimestamp(int(pub_raw)).strftime('%d.%m.%Y')
+                elif isinstance(pub_raw, str) and pub_raw:
+                    dt = pd.to_datetime(pub_raw, utc=True).strftime('%d.%m.%Y')
             except Exception:
-                dt = ''
+                pass
 
-            pub_info = f" · *{publisher}*" if publisher else ""
+            src_info  = f" · *{source}*" if source else ""
             date_info = f" · {dt}" if dt else ""
 
             if link:
-                st.markdown(f"- [{title}]({link}){pub_info}{date_info}")
+                st.markdown(f"- [{title}]({link}){src_info}{date_info}")
             else:
-                st.markdown(f"- **{title}**{pub_info}{date_info}")
+                st.markdown(f"- **{title}**{src_info}{date_info}")
             shown += 1
 
         if shown == 0:
