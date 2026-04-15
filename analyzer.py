@@ -6,6 +6,7 @@ import yfinance as yf
 import pandas as pd
 import math
 import time
+import random
 import requests
 import feedparser
 from datetime import datetime, timezone, timedelta
@@ -215,7 +216,7 @@ def fetch_stock_data(ticker_symbol: str) -> dict:
     ticker_symbol = ticker_symbol.strip().upper()
 
     last_error = None
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             ticker = yf.Ticker(ticker_symbol)
             info = ticker.info
@@ -224,7 +225,8 @@ def fetch_stock_data(ticker_symbol: str) -> dict:
         except Exception as e:
             last_error = e
             if "rate" in str(e).lower() or "429" in str(e) or "too many" in str(e).lower():
-                wait = (attempt + 1) * 15  # 15s, 30s, 45s
+                # Exponentielles Backoff: 20s, 40s, 80s, 160s + zufällige Pause
+                wait = (2 ** attempt) * 20 + random.uniform(1, 5)
                 time.sleep(wait)
             else:
                 break
@@ -244,11 +246,11 @@ def fetch_stock_data(ticker_symbol: str) -> dict:
     # Finanzdaten einzeln abrufen – ETFs/Indizes haben keine Jahresabschlüsse
     # Kleine Pausen zwischen Requests um Yahoo Finance Rate-Limiting zu vermeiden
     financials = _safe_fetch(ticker, 'financials')
-    time.sleep(0.5)
+    time.sleep(random.uniform(1.0, 2.0))
     balance_sheet = _safe_fetch(ticker, 'balance_sheet')
-    time.sleep(0.5)
+    time.sleep(random.uniform(1.0, 2.0))
     cashflow = _safe_fetch(ticker, 'cashflow')
-    time.sleep(0.5)
+    time.sleep(random.uniform(1.0, 2.0))
 
     if financials is None and info.get('totalRevenue') is None:
         raise ValueError(
