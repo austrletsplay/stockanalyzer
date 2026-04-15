@@ -15,23 +15,56 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from datetime import datetime, timedelta
+import json, os
 
 from analyzer import fetch_stock_data, calculate_metrics, fetch_price_history, PERIOD_CONFIG
 from scorer import calculate_score
 from excel_export import generate_excel
 
-# ── Einfacher In-Memory Cache (1 Stunde TTL) ──────────────────────────────────
+# ── Persistenter Datei-Cache (überlebt Render Neustarts) ──────────────────────
+_CACHE_FILE = "/tmp/vestly_cache.json"
 _cache: dict = {}
-CACHE_TTL = timedelta(hours=1)
+CACHE_TTL_ANALYZE = timedelta(hours=4)   # Fundamentaldaten ändern sich selten
+CACHE_TTL_PRICE   = timedelta(hours=1)
 
-def _cache_get(key: str):
+def _load_cache():
+    """Cache beim Start aus Datei laden."""
+    global _cache
+    try:
+        if os.path.exists(_CACHE_FILE):
+            with open(_CACHE_FILE, "r") as f:
+                raw = json.load(f)
+            # Zeitstempel von ISO-String zurück zu datetime
+            for key, entry in raw.items():
+                entry['time'] = datetime.fromisoformat(entry['time'])
+            _cache = raw
+    except Exception:
+        _cache = {}
+
+def _save_cache():
+    """Cache in Datei schreiben (Zeitstempel als ISO-String serialisieren)."""
+    try:
+        serializable = {
+            k: {'data': v['data'], 'time': v['time'].isoformat()}
+            for k, v in _cache.items()
+        }
+        with open(_CACHE_FILE, "w") as f:
+            json.dump(serializable, f)
+    except Exception:
+        pass
+
+def _cache_get(key: str, ttl: timedelta = CACHE_TTL_ANALYZE):
     entry = _cache.get(key)
-    if entry and datetime.now() - entry['time'] < CACHE_TTL:
+    if entry and datetime.now() - entry['time'] < ttl:
         return entry['data']
     return None
 
 def _cache_set(key: str, data):
     _cache[key] = {'data': data, 'time': datetime.now()}
+    _save_cache()
+
+# Cache beim Start laden
+_load_cache()
 
 # ── App erstellen ──────────────────────────────────────────────────────────────
 # FastAPI() erstellt die Web-API. Der title und description erscheinen in der
@@ -73,8 +106,8 @@ def analyze(ticker: str):
         ticker = ticker.upper()
         cache_key = f"analyze_{ticker}"
 
-        # Cache prüfen
-        cached = _cache_get(cache_key)
+        # Cache prüfen (4h TTL für Fundamentaldaten)
+        cached = _cache_get(cache_key, CACHE_TTL_ANALYZE)
         if cached:
             return cached
 
@@ -130,7 +163,7 @@ def price(ticker: str, period: str = "1M"):
     ticker = ticker.upper()
     cache_key = f"price_{ticker}_{period}"
 
-    cached = _cache_get(cache_key)
+    cached = _cache_get(cache_key, CACHE_TTL_PRICE)
     if cached:
         return cached
 
